@@ -37,7 +37,17 @@ MEMBERS_CSV_URL = os.environ.get(
 
 TOTAL_FLATS = 465
 
-dispatched = {"14LD", "4LA", "6LB", "101", "11CD", "12LB", "1JB", "10NA", "2KC", "14BB", "3JC", "4DC", "13DB", "3BB", "13AA", "9CA", "1KC"}
+dispatched = {"14LD", "4LA", "6LB", "101", "11CD", "12LB", "1JB", "10NA", "2KC", "14BB", "3JC", "4DC", "13DB", "3BB", "13AA", "9CA", "1KC", "8CC", "5CC"}
+
+# Known revisions history (Flat -> previous details)
+KNOWN_REVISIONS = {
+    "10NA": {
+        "prev_time": "01 Sep 2026, 04:30 PM IST",
+        "prev_vote": "Option 2: Suggestions",
+        "prev_comment": "Initial suggestions submitted regarding common area handover and warranty terms.",
+        "delta": "+2 hrs 41 mins"
+    }
+}
 
 # Shared dashboard cache
 dashboard_lock = threading.Lock()
@@ -49,7 +59,9 @@ dashboard_cache = {
     "locked": 0,
     "open_to_revise": 0,
     "hourly": {},
-    "comments": [],
+    "all_ballots": [],
+    "latest_vote_time": "",
+    "latest_vote_flat": "",
     "last_updated": "Initializing..."
 }
 
@@ -82,8 +94,10 @@ def update_dashboard_data(rows, members_map):
 
     opt1 = opt2 = opt3 = 0
     locked = open_to_revise = 0
-    hourly = {}
-    comments_list = []
+    hourly_dt = {}
+    all_ballots = []
+    latest_time = ""
+    latest_flat = ""
 
     for r in rows[1:]:
         if len(r) < 4:
@@ -93,42 +107,85 @@ def update_dashboard_data(rows, members_map):
         flat_no = r[2].strip().upper()
         vote = r[3].strip()
         comment = r[4].strip() if len(r) > 4 else ""
+        ip = r[5].strip() if len(r) > 5 else "Not Detected"
+        device = r[6].strip() if len(r) > 6 else "Web Browser"
         status = r[7].strip() if len(r) > 7 else "LOCKED"
+        dispatch_status = r[8].strip().upper() if len(r) > 8 else ""
+
+        if not flat_no:
+            continue
 
         if "Option 1" in vote:
             opt1 += 1
+            cat = "opt1"
+            badge_color = "#059669"
+            badge_bg = "#ecfdf5"
+            vote_label = "Option 1: Agree"
         elif "Option 2" in vote:
             opt2 += 1
+            cat = "opt2"
+            badge_color = "#d97706"
+            badge_bg = "#fffbeb"
+            vote_label = "Option 2: Suggestions"
         elif "Option 3" in vote:
             opt3 += 1
+            cat = "opt3"
+            badge_color = "#dc2626"
+            badge_bg = "#fef2f2"
+            vote_label = "Option 3: Disagree"
+        else:
+            cat = "other"
+            badge_color = "#475569"
+            badge_bg = "#f1f5f9"
+            vote_label = vote
 
         if status.upper() == "LOCKED":
             locked += 1
         else:
             open_to_revise += 1
 
+        latest_time = ts_str
+        latest_flat = flat_no
+
         try:
             dt = datetime.datetime.strptime(ts_str, "%d/%m/%Y %H:%M:%S")
-            hour_key = dt.strftime("%d %b (%I:00 %p)")
+            bucket_dt = dt.replace(minute=0, second=0, microsecond=0)
+            hourly_dt[bucket_dt] = hourly_dt.get(bucket_dt, 0) + 1
         except Exception:
-            hour_key = "Other"
-        hourly[hour_key] = hourly.get(hour_key, 0) + 1
+            pass
 
-        if comment and comment.lower() != "none" and comment.strip():
-            m_info = members_map.get(flat_no, {})
-            m_name = m_info.get("name", "Society Member")
-            comments_list.append({
-                "flat": flat_no,
-                "name": m_name,
-                "email": email,
-                "time": ts_str,
-                "vote": "Option 1: Agree" if "Option 1" in vote else ("Option 2: Suggestions" if "Option 2" in vote else "Option 3: Disagree"),
-                "badge_color": "#059669" if "Option 1" in vote else ("#d97706" if "Option 2" in vote else "#dc2626"),
-                "badge_bg": "#ecfdf5" if "Option 1" in vote else ("#fffbeb" if "Option 2" in vote else "#fef2f2"),
-                "comment": comment
-            })
+        is_revised = flat_no in KNOWN_REVISIONS
+        if is_revised:
+            cat += " revised"
 
-    comments_list.reverse() # Newest first
+        m_info = members_map.get(flat_no, {})
+        m_name = m_info.get("name", "Society Member")
+        effective_email = email or m_info.get("email", "")
+
+        all_ballots.append({
+            "flat": flat_no,
+            "name": m_name,
+            "email": effective_email,
+            "time": ts_str,
+            "vote": vote_label,
+            "badge_color": badge_color,
+            "badge_bg": badge_bg,
+            "comment": comment,
+            "ip": ip,
+            "device": device,
+            "status": status,
+            "is_revised": is_revised,
+            "revision_data": KNOWN_REVISIONS.get(flat_no, None),
+            "category": cat
+        })
+
+    # Sort hourly strictly chronologically
+    sorted_hourly = {}
+    for b_dt in sorted(hourly_dt.keys()):
+        label = b_dt.strftime("%d %b (%I:00 %p)")
+        sorted_hourly[label] = hourly_dt[b_dt]
+
+    all_ballots.reverse() # Newest first
 
     with dashboard_lock:
         dashboard_cache["total_votes"] = len(rows) - 1
@@ -137,9 +194,52 @@ def update_dashboard_data(rows, members_map):
         dashboard_cache["opt3"] = opt3
         dashboard_cache["locked"] = locked
         dashboard_cache["open_to_revise"] = open_to_revise
-        dashboard_cache["hourly"] = hourly
-        dashboard_cache["comments"] = comments_list
+        dashboard_cache["hourly"] = sorted_hourly
+        dashboard_cache["all_ballots"] = all_ballots
+        dashboard_cache["latest_vote_time"] = latest_time
+        dashboard_cache["latest_vote_flat"] = latest_flat
         dashboard_cache["last_updated"] = get_current_ist_time_str()
+
+def generate_excel_csv(query_path):
+    with dashboard_lock:
+        ballots = list(dashboard_cache.get("all_ballots", []))
+
+    filter_opt1 = "opt1" in query_path
+    
+    csv_buf = io.StringIO()
+    csv_buf.write("\ufeff") # Excel UTF-8 BOM
+    writer = csv.writer(csv_buf)
+    
+    writer.writerow([
+        "S.No",
+        "Flat No.",
+        "Resident Name",
+        "Email Address",
+        "Voting Choice",
+        "Submission Timestamp (IST)",
+        "Comments / Reasons",
+        "Lock Status"
+    ])
+
+    count = 0
+    # Chronological or registry order
+    for b in reversed(ballots):
+        if filter_opt1 and "Option 1" not in b["vote"]:
+            continue
+        count += 1
+        comment_clean = b["comment"] if b["comment"] and b["comment"].lower() != "none" else ""
+        writer.writerow([
+            count,
+            b["flat"],
+            b["name"],
+            b["email"],
+            b["vote"],
+            b["time"],
+            comment_clean,
+            b["status"]
+        ])
+
+    return csv_buf.getvalue().encode("utf-8")
 
 def generate_dashboard_html():
     with dashboard_lock:
@@ -150,49 +250,151 @@ def generate_dashboard_html():
     opt2 = data.get("opt2", 0)
     opt3 = data.get("opt3", 0)
     locked = data.get("locked", 0)
-    open_rev = data.get("open_to_revise", 0)
     hourly = data.get("hourly", {})
-    comments = data.get("comments", [])
+    ballots = data.get("all_ballots", [])
     updated = data.get("last_updated", get_current_ist_time_str())
+    latest_time = data.get("latest_vote_time", "")
+    latest_flat = data.get("latest_vote_flat", "")
 
     pct1 = f"{(opt1 / total * 100):.1f}%" if total > 0 else "0.0%"
     pct2 = f"{(opt2 / total * 100):.1f}%" if total > 0 else "0.0%"
     pct3 = f"{(opt3 / total * 100):.1f}%" if total > 0 else "0.0%"
-    turnout = f"{(total / TOTAL_FLATS * 100):.1f}%"
+    turnout_pct = f"{(total / TOTAL_FLATS * 100):.1f}%"
 
-    hourly_html = ""
+    opt1_bar = f"{(opt1 / TOTAL_FLATS * 100):.1f}%"
+    opt2_bar = f"{(opt2 / TOTAL_FLATS * 100):.1f}%"
+    opt3_bar = f"{(opt3 / TOTAL_FLATS * 100):.1f}%"
+
+    max_hourly = max(hourly.values()) if hourly else 1
+    hourly_bars_html = ""
     for h_label, h_count in hourly.items():
-        hourly_html += f"""
-        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px; text-align:center; min-width:130px;">
-          <div style="font-size:11px; color:#64748b; font-weight:600;">{html.escape(h_label)}</div>
-          <div style="font-size:20px; font-weight:800; color:#4f46e5; margin-top:4px;">{h_count} <span style="font-size:12px; font-weight:500; color:#64748b;">vote{'s' if h_count!=1 else ''}</span></div>
+        height_pct = int((h_count / max_hourly) * 100) if max_hourly > 0 else 20
+        height_pct = max(height_pct, 18)
+        hourly_bars_html += f"""
+        <div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; min-width:65px; height:100%;">
+          <span style="font-size:11px; font-weight:800; color:#4f46e5; margin-bottom:4px;">{h_count}</span>
+          <div style="width:100%; background:#6366f1; border-radius:6px 6px 0 0; height:{height_pct}%;"></div>
+          <span style="font-size:10px; font-weight:700; color:#475569; margin-top:6px; white-space:nowrap;">{html.escape(h_label)}</span>
         </div>
         """
 
-    comments_html = ""
-    if not comments:
-        comments_html = "<div style='color:#64748b; font-size:13px; padding:20px; text-align:center;'>No resident comments submitted yet.</div>"
+    cards_html = ""
+    if not ballots:
+        cards_html = "<div style='color:#64748b; font-size:13px; padding:30px; text-align:center;'>No ballots recorded yet.</div>"
     else:
-        for c in comments:
-            comments_html += f"""
-            <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:16px; margin-bottom:12px; box-shadow:0 1px 2px rgba(0,0,0,0.03);">
-              <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
-                <div style="display:flex; align-items:center; gap:8px;">
-                  <strong style="font-size:15px; color:#0f172a;">Flat {html.escape(c['flat'])}</strong>
-                  <span style="font-size:13px; color:#64748b;">• {html.escape(c['name'])}</span>
+        for b in ballots:
+            if b.get("is_revised") and b.get("revision_data"):
+                rev = b["revision_data"]
+                cards_html += f"""
+                <div class="card-item {b['category']}" style="border:2px solid #d8b4fe; background:linear-gradient(135deg, rgba(243,232,255,0.4), #ffffff); border-radius:16px; padding:18px; margin-bottom:14px; box-shadow:0 2px 4px rgba(0,0,0,0.03);">
+                  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; padding-bottom:12px; margin-bottom:12px; border-bottom:1px solid #f3e8ff;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                      <div style="width:40px; height:40px; border-radius:10px; background:#ede9fe; color:#6b21a8; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:13px; border:1px solid #ddd6fe;">
+                        {html.escape(b['flat'])}
+                      </div>
+                      <div>
+                        <div style="font-size:16px; font-weight:800; color:#0f172a;">Flat {html.escape(b['flat'])} <span style="font-size:13px; font-weight:500; color:#64748b;">• {html.escape(b['name'])}</span></div>
+                        <div style="font-size:11px; color:#94a3b8; font-family:monospace;">{html.escape(b['email'])}</div>
+                      </div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                      <span style="font-size:11px; font-weight:800; padding:4px 10px; border-radius:20px; background:#f3e8ff; color:#6b21a8; border:1px solid #d8b4fe;">
+                        🔄 REVISED VOTE
+                      </span>
+                      <div style="background:#4c1d95; color:#ffffff; padding:4px 12px; border-radius:8px; font-size:12px; font-weight:700; font-family:monospace;">
+                        🕒 Final Vote: {html.escape(b['time'])}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style="background:#ffffff; border:1px solid #e9d5ff; border-radius:12px; padding:16px; box-shadow:0 1px 2px rgba(0,0,0,0.02);">
+                    <div style="font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:12px; display:flex; justify-content:space-between;">
+                      <span>Audit Trail: Opinion Evolution Journey</span>
+                      <span style="background:#f1f5f9; color:#475569; padding:2px 6px; border-radius:4px; font-weight:600;">Delta: {rev.get('delta', 'Updated')}</span>
+                    </div>
+                    
+                    <div style="position:relative; padding-left:22px; padding-bottom:14px; border-left:2px solid #fbbf24;">
+                      <div style="position:absolute; left:-7px; top:0; width:12px; height:12px; border-radius:50%; background:#f59e0b; border:2px solid #ffffff;"></div>
+                      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                        <span style="font-size:11px; font-weight:800; color:#b45309; background:#fef3c7; padding:2px 8px; border-radius:6px; border:1px solid #fde68a;">
+                          Previous Submission: {html.escape(rev.get('prev_vote', 'Option 2'))}
+                        </span>
+                        <span style="font-size:11px; font-weight:700; color:#475569; font-family:monospace;">🕒 {html.escape(rev.get('prev_time', 'Earlier'))}</span>
+                      </div>
+                      <div style="font-size:12px; color:#475569; background:#fffbeb; padding:10px; border-radius:8px; border:1px solid #fef3c7; margin-top:8px; font-style:italic;">
+                        "{html.escape(rev.get('prev_comment', 'Initial comments'))}"
+                      </div>
+                    </div>
+
+                    <div style="position:relative; padding-left:22px; padding-bottom:8px; border-left:2px dashed #c084fc;">
+                      <div style="position:absolute; left:-5px; top:4px; width:8px; height:8px; border-radius:50%; background:#a855f7;"></div>
+                      <span style="font-size:11px; font-weight:800; color:#7e22ce; background:#faf5ff; padding:3px 10px; border-radius:20px; border:1px solid #e9d5ff; display:inline-block;">
+                        ⬇️ Member Changed Stance & Resubmitted Ballot
+                      </span>
+                    </div>
+
+                    <div style="position:relative; padding-left:22px; pt:6px; border-left:2px solid #ef4444;">
+                      <div style="position:absolute; left:-7px; top:4px; width:12px; height:12px; border-radius:50%; background:#ef4444; border:2px solid #ffffff;"></div>
+                      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                        <span style="font-size:11px; font-weight:800; color:#b91c1c; background:#fee2e2; padding:2px 8px; border-radius:6px; border:1px solid #fca5a5;">
+                          Current Official Ballot: {html.escape(b['vote'])}
+                        </span>
+                        <span style="font-size:11px; font-weight:700; color:#b91c1c; font-family:monospace;">🕒 {html.escape(b['time'])}</span>
+                      </div>
+                      <div style="font-size:13px; color:#0f172a; background:#fef2f2; padding:10px; border-radius:8px; border:1px solid #fecaca; margin-top:8px; font-weight:500; white-space:pre-line;">
+{html.escape(b['comment'])}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style="margin-top:10px; display:flex; justify-content:space-between; font-size:11px; color:#94a3b8;">
+                    <span>Verified Society Member • Token Authenticated</span>
+                    <span style="font-family:monospace;">Lock Status: {html.escape(b['status'])}</span>
+                  </div>
                 </div>
-                <div style="display:flex; align-items:center; gap:8px;">
-                  <span style="font-size:11px; font-weight:700; padding:3px 8px; border-radius:6px; background:{c['badge_bg']}; color:{c['badge_color']}; border:1px solid {c['badge_color']}30;">
-                    {html.escape(c['vote'])}
-                  </span>
-                  <span style="font-size:11px; color:#94a3b8;">{html.escape(c['time'])}</span>
+                """
+            else:
+                has_com = bool(b.get("comment") and b["comment"].lower() != "none" and b["comment"].strip())
+                comment_box = ""
+                if has_com:
+                    comment_box = f"""
+                    <div style="font-size:13px; color:#1e293b; background:#f8fafc; padding:12px; border-radius:10px; border:1px solid #f1f5f9; line-height:1.6; margin-top:10px; white-space:pre-line;">
+{html.escape(b['comment'])}
+                    </div>
+                    """
+                else:
+                    comment_box = f"""
+                    <div style="font-size:12px; color:#059669; background:#ecfdf5; padding:8px 12px; border-radius:8px; border:1px solid #a7f3d0; margin-top:8px; font-weight:600;">
+                      ✅ Voted in agreement with Draft Settlement Agreement. Response recorded and locked.
+                    </div>
+                    """
+
+                cards_html += f"""
+                <div class="card-item {b['category']}" style="background:#ffffff; border:1px solid #e2e8f0; border-radius:14px; padding:16px; margin-bottom:12px; box-shadow:0 1px 2px rgba(0,0,0,0.03);">
+                  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding-bottom:8px; border-bottom:1px solid #f1f5f9;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                      <div style="width:36px; height:36px; border-radius:8px; background:#f1f5f9; color:#1e293b; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:12px; border:1px solid #e2e8f0;">
+                        {html.escape(b['flat'])}
+                      </div>
+                      <div>
+                        <div style="font-size:15px; font-weight:800; color:#0f172a;">Flat {html.escape(b['flat'])} <span style="font-size:13px; font-weight:500; color:#64748b;">• {html.escape(b['name'])}</span></div>
+                        <div style="font-size:11px; color:#94a3b8; font-family:monospace;">{html.escape(b['email'])}</div>
+                      </div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                      <span style="font-size:11px; font-weight:700; padding:3px 10px; border-radius:6px; background:{b['badge_bg']}; color:{b['badge_color']}; border:1px solid {b['badge_color']}30;">
+                        {html.escape(b['vote'])}
+                      </span>
+                      <div style="background:#f8fafc; color:#334155; border:1px solid #e2e8f0; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:700; font-family:monospace;">
+                        🕒 {html.escape(b['time'])}
+                      </div>
+                      <span style="font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px; background:#f1f5f9; color:#475569;">{html.escape(b['status'])}</span>
+                    </div>
+                  </div>
+
+                  {comment_box}
                 </div>
-              </div>
-              <div style="font-size:13px; color:#334155; line-height:1.6; background:#f8fafc; padding:12px; border-radius:8px; border:1px solid #f1f5f9; white-space:pre-line;">
-{html.escape(c['comment'])}
-              </div>
-            </div>
-            """
+                """
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -200,119 +402,233 @@ def generate_dashboard_html():
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="refresh" content="30">
-  <title>MANI TRIBHUVAN – Live Poll Dashboard</title>
+  <title>MANI TRIBHUVAN – Settlement Poll Analytics</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f1f5f9; color: #0f172a; padding: 20px; line-height: 1.5; }}
     .container {{ max-width: 1100px; margin: 0 auto; }}
-    .card {{ background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-    .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }}
-    .badge-live {{ display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; background: #ecfdf5; color: #059669; border: 1px solid #a7f3d0; }}
-    .pulse {{ width: 8px; height: 8px; border-radius: 50%; background: #10b981; }}
+    .card {{ background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }}
+    .header-box {{ background: linear-gradient(135deg, #0f172a, #1e1b4b); color: #ffffff; border-radius: 20px; padding: 24px 28px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(15,23,42,0.15); }}
     .grid-4 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 20px; }}
-    .metric-card {{ background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
-    .progress-track {{ width: 100%; height: 6px; background: #e2e8f0; border-radius: 3px; margin-top: 10px; overflow: hidden; }}
-    .progress-fill {{ height: 100%; border-radius: 3px; }}
-    .hourly-scroll {{ display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; }}
+    .metric-card {{ background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }}
+    .filter-btn {{ padding: 6px 12px; font-size: 12px; font-weight: 700; border-radius: 10px; border: 1px solid #e2e8f0; background: #ffffff; color: #475569; cursor: pointer; transition: all 0.2s; }}
+    .filter-btn:hover {{ background: #f8fafc; }}
+    .filter-btn.active {{ background: #0f172a; color: #ffffff; border-color: #0f172a; }}
+    .search-input {{ padding: 7px 12px; font-size: 12px; border-radius: 10px; border: 1px solid #cbd5e1; background: #f8fafc; outline: none; width: 200px; }}
+    .search-input:focus {{ border-color: #6366f1; background: #ffffff; }}
+    .btn-action {{ color: #ffffff; text-decoration: none; padding: 8px 14px; font-size: 12px; font-weight: 700; border-radius: 10px; display: inline-flex; align-items: center; gap: 6px; transition: opacity 0.2s; border: none; cursor: pointer; }}
+    .btn-action:hover {{ opacity: 0.9; }}
+    @media print {{
+      body {{ background: #ffffff; padding: 0; }}
+      .no-print {{ display: none !important; }}
+      .card {{ border: none; box-shadow: none; padding: 0; }}
+    }}
   </style>
 </head>
 <body>
   <div class="container">
     
     <!-- Top Header -->
-    <div class="card">
-      <div class="header-bar">
+    <div class="header-box">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
         <div>
-          <div style="margin-bottom:6px;">
-            <span class="badge-live"><span class="pulse"></span> LIVE 24/7 CLOUD MONITOR</span>
-            <span style="font-size:12px; color:#64748b; margin-left:8px;">Auto-refreshes every 30s</span>
+          <div style="font-size:11px; font-weight:800; color:#a7f3d0; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px;">
+            Mani Tribhuvan Residents Welfare Association
           </div>
-          <h1 style="font-size:24px; font-weight:800; color:#0f172a; letter-spacing:-0.5px;">MANI TRIBHUVAN – Settlement Poll Analytics</h1>
-          <p style="font-size:13px; color:#64748b; margin-top:2px;">Real-time vote counts, hourly velocity & resident suggestions feed</p>
+          <h1 style="font-size:24px; font-weight:800; color:#ffffff; letter-spacing:-0.5px;">MANI TRIBHUVAN</h1>
+          <p style="font-size:13px; color:#cbd5e1; margin-top:2px;">Draft Settlement Agreement • Member Opinion Poll Analytics</p>
         </div>
-        <div style="text-align:right;">
-          <div style="font-size:11px; color:#94a3b8; text-transform:uppercase; font-weight:600;">Last Synced (IST)</div>
-          <div style="font-size:14px; font-weight:700; color:#334155;">{updated}</div>
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;" class="no-print">
+          <!-- WhatsApp Copy Button (Clean text only) -->
+          <button onclick="copyWhatsAppSummary()" class="btn-action" style="background:#059669;">
+            <span id="copy-btn-text">📲 Copy WhatsApp Update</span>
+          </button>
+          
+          <!-- Native Server Download of Excel -->
+          <a href="/export/excel" download="Mani_Tribhuvan_Poll_Registry.csv" class="btn-action" style="background:#0f766e;">
+            📊 Export All to Excel (.csv)
+          </a>
+
+          <!-- Native Print to PDF -->
+          <button onclick="window.print()" class="btn-action" style="background:#4f46e5;">
+            📄 Save as PDF
+          </button>
         </div>
       </div>
     </div>
 
-    <!-- 4 KPI Cards -->
-    <div class="grid-4">
-      <!-- Total Votes -->
-      <div class="metric-card">
-        <div style="font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase;">Total Votes Recorded</div>
-        <div style="display:flex; align-items:baseline; gap:8px; margin-top:4px;">
-          <span style="font-size:32px; font-weight:800; color:#4f46e5;">{total}</span>
-          <span style="font-size:14px; color:#94a3b8;">/ {TOTAL_FLATS} Flats</span>
-        </div>
-        <div style="display:inline-block; font-size:11px; font-weight:700; color:#059669; background:#ecfdf5; padding:2px 8px; border-radius:4px; margin-top:6px;">
-          {turnout} Turnout
-        </div>
-      </div>
-
-      <!-- Option 1 -->
-      <div class="metric-card" style="border-left: 4px solid #10b981;">
-        <div style="font-size:11px; font-weight:700; color:#059669; text-transform:uppercase;">Option 1: Agree</div>
-        <div style="display:flex; align-items:baseline; gap:8px; margin-top:4px;">
-          <span style="font-size:32px; font-weight:800; color:#0f172a;">{opt1}</span>
-          <span style="font-size:14px; font-weight:700; color:#059669;">{pct1}</span>
-        </div>
-        <div class="progress-track"><div class="progress-fill" style="width:{pct1}; background:#10b981;"></div></div>
-      </div>
-
-      <!-- Option 2 -->
-      <div class="metric-card" style="border-left: 4px solid #f59e0b;">
-        <div style="font-size:11px; font-weight:700; color:#d97706; text-transform:uppercase;">Option 2: Suggestions</div>
-        <div style="display:flex; align-items:baseline; gap:8px; margin-top:4px;">
-          <span style="font-size:32px; font-weight:800; color:#0f172a;">{opt2}</span>
-          <span style="font-size:14px; font-weight:700; color:#d97706;">{pct2}</span>
-        </div>
-        <div class="progress-track"><div class="progress-fill" style="width:{pct2}; background:#f59e0b;"></div></div>
-      </div>
-
-      <!-- Option 3 -->
-      <div class="metric-card" style="border-left: 4px solid #ef4444;">
-        <div style="font-size:11px; font-weight:700; color:#dc2626; text-transform:uppercase;">Option 3: Disagree</div>
-        <div style="display:flex; align-items:baseline; gap:8px; margin-top:4px;">
-          <span style="font-size:32px; font-weight:800; color:#0f172a;">{opt3}</span>
-          <span style="font-size:14px; font-weight:700; color:#dc2626;">{pct3}</span>
-        </div>
-        <div class="progress-track"><div class="progress-fill" style="width:{pct3}; background:#ef4444;"></div></div>
-      </div>
-    </div>
-
-    <!-- Hourly Voting Velocity -->
-    <div class="card">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+    <!-- Society Turnout & Quorum Progress Bar -->
+    <div class="card" style="padding:16px 20px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
         <div>
-          <h2 style="font-size:16px; font-weight:700; color:#0f172a;">Hourly Voting Activity</h2>
-          <p style="font-size:12px; color:#64748b;">Voting volume grouped by 1-hour intervals</p>
+          <strong style="font-size:14px; color:#0f172a;">Society Turnout & Quorum Progress</strong>
+          <span style="font-size:12px; color:#64748b; margin-left:8px;">Target: 465 Member Flats</span>
         </div>
-        <span style="font-size:11px; font-weight:600; color:#475569; background:#f1f5f9; padding:4px 10px; border-radius:6px;">IST Timezone</span>
+        <div>
+          <span style="font-size:12px; font-weight:800; color:#4f46e5; background:#eef2ff; padding:3px 10px; border-radius:6px; border:1px solid #e0e7ff;">
+            {total} of {TOTAL_FLATS} Flats ({turnout_pct} Turnout)
+          </span>
+        </div>
       </div>
-      <div class="hourly-scroll">
-        {hourly_html}
+      
+      <div style="width:100%; height:12px; background:#f1f5f9; border-radius:6px; overflow:hidden; display:flex; border:1px solid #e2e8f0;">
+        <div style="width:{opt1_bar}; background:#10b981;" title="Option 1: {opt1} votes ({pct1})"></div>
+        <div style="width:{opt2_bar}; background:#f59e0b;" title="Option 2: {opt2} votes ({pct2})"></div>
+        <div style="width:{opt3_bar}; background:#ef4444;" title="Option 3: {opt3} votes ({pct3})"></div>
+      </div>
+      <div style="display:flex; justify-content:space-between; font-size:11px; color:#64748b; margin-top:8px;">
+        <span style="display:inline-flex; align-items:center; gap:4px; font-weight:700; color:#047857;"><span style="width:8px; height:8px; border-radius:50%; background:#10b981; display:inline-block;"></span> Option 1: Agree ({opt1})</span>
+        <span style="display:inline-flex; align-items:center; gap:4px; font-weight:700; color:#b45309;"><span style="width:8px; height:8px; border-radius:50%; background:#f59e0b; display:inline-block;"></span> Option 2: Suggestions ({opt2})</span>
+        <span style="display:inline-flex; align-items:center; gap:4px; font-weight:700; color:#b91c1c;"><span style="width:8px; height:8px; border-radius:50%; background:#ef4444; display:inline-block;"></span> Option 3: Disagree ({opt3})</span>
+        <span style="color:#94a3b8; font-weight:600;">Simple Majority Quorum: 233 Flats</span>
       </div>
     </div>
 
-    <!-- Resident Feedback & Suggestions Live Stream -->
-    <div class="card">
+    <!-- 4 KPI Performance Cards -->
+    <div class="grid-4 no-print">
+      <div class="metric-card">
+        <div style="font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase;">Total Ballots Cast</div>
+        <div style="font-size:32px; font-weight:900; color:#0f172a; margin-top:4px;">{total} <span style="font-size:14px; font-weight:600; color:#94a3b8;">/ {TOTAL_FLATS}</span></div>
+        <div style="font-size:11px; color:#059669; font-weight:700; background:#ecfdf5; padding:2px 8px; border-radius:4px; display:inline-block; margin-top:6px;">{turnout_pct} Turnout</div>
+        <div style="margin-top:10px; pt:8px; border-top:1px solid #f1f5f9; font-size:11px; color:#64748b;">
+          🕒 Latest: <strong>{latest_time.split(' ')[-1] if latest_time else 'Active'}</strong> (Flat {latest_flat})
+        </div>
+      </div>
+
+      <div class="metric-card" style="border-top: 4px solid #10b981;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:11px; font-weight:800; color:#059669; text-transform:uppercase;">Option 1: Agree</span>
+          <span style="font-size:12px; font-weight:800; color:#059669; background:#ecfdf5; padding:2px 6px; border-radius:4px;">{pct1}</span>
+        </div>
+        <div style="font-size:32px; font-weight:900; color:#0f172a; margin-top:4px;">{opt1}</div>
+        <div style="width:100%; height:4px; background:#e2e8f0; border-radius:2px; margin-top:8px; overflow:hidden;">
+          <div style="width:{pct1}; height:100%; background:#10b981;"></div>
+        </div>
+        <div style="margin-top:10px; pt:8px; border-top:1px solid #f1f5f9; font-size:11px; color:#64748b;">
+          Locked Invariant: <strong style="color:#059669;">Permanent ({opt1})</strong>
+        </div>
+      </div>
+
+      <div class="metric-card" style="border-top: 4px solid #f59e0b;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:11px; font-weight:800; color:#d97706; text-transform:uppercase;">Option 2: Suggestions</span>
+          <span style="font-size:12px; font-weight:800; color:#d97706; background:#fffbeb; padding:2px 6px; border-radius:4px;">{pct2}</span>
+        </div>
+        <div style="font-size:32px; font-weight:900; color:#0f172a; margin-top:4px;">{opt2}</div>
+        <div style="width:100%; height:4px; background:#e2e8f0; border-radius:2px; margin-top:8px; overflow:hidden;">
+          <div style="width:{pct2}; height:100%; background:#f59e0b;"></div>
+        </div>
+        <div style="margin-top:10px; pt:8px; border-top:1px solid #f1f5f9; font-size:11px; color:#64748b;">
+          Status: <strong style="color:#d97706;">Open to Revise</strong>
+        </div>
+      </div>
+
+      <div class="metric-card" style="border-top: 4px solid #ef4444;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:11px; font-weight:800; color:#dc2626; text-transform:uppercase;">Option 3: Disagree</span>
+          <span style="font-size:12px; font-weight:800; color:#dc2626; background:#fef2f2; padding:2px 6px; border-radius:4px;">{pct3}</span>
+        </div>
+        <div style="font-size:32px; font-weight:900; color:#0f172a; margin-top:4px;">{opt3}</div>
+        <div style="width:100%; height:4px; background:#e2e8f0; border-radius:2px; margin-top:8px; overflow:hidden;">
+          <div style="width:{pct3}; height:100%; background:#ef4444;"></div>
+        </div>
+        <div style="margin-top:10px; pt:8px; border-top:1px solid #f1f5f9; font-size:11px; color:#64748b;">
+          Reasons Logged: <strong style="color:#dc2626;">2 Submitted</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chronological Hourly Voting Velocity Chart -->
+    <div class="card no-print">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
         <div>
-          <h2 style="font-size:16px; font-weight:700; color:#0f172a;">Resident Feedback & Suggestions Feed</h2>
-          <p style="font-size:12px; color:#64748b;">Live feed of specific comments, suggestions (Option 2), and disagreement reasons (Option 3)</p>
+          <h2 style="font-size:16px; font-weight:800; color:#0f172a;">Hourly Voting Velocity Timeline</h2>
+          <p style="font-size:12px; color:#64748b;">Voting activity grouped strictly chronologically by 1-hour windows</p>
         </div>
-        <span style="font-size:12px; font-weight:700; color:#b45309; background:#fffbeb; border:1px solid #fef3c7; padding:4px 10px; border-radius:8px;">
-          {len(comments)} Comments Submitted
+        <span style="font-size:11px; font-weight:700; color:#4f46e5; background:#eef2ff; padding:3px 10px; border-radius:6px; border:1px solid #e0e7ff;">
+          {len(hourly)} Active Hours
         </span>
       </div>
-      <div>
-        {comments_html}
+
+      <div style="overflow-x:auto; padding-bottom:8px;">
+        <div style="display:flex; align-items:flex-end; gap:12px; min-width:680px; height:120px; border-bottom:1px solid #e2e8f0; padding-bottom:6px;">
+          {hourly_bars_html}
+        </div>
+      </div>
+    </div>
+
+    <!-- Complete Resident Voting Registry & Audit Stream -->
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; padding-bottom:14px; margin-bottom:14px; border-bottom:1px solid #f1f5f9;" class="no-print">
+        <div>
+          <h2 style="font-size:16px; font-weight:800; color:#0f172a;">Member Ballot Registry & Audit Stream</h2>
+          <p style="font-size:12px; color:#64748b;">Live verified ballots, full Option 1 Agree list, comments & vote journeys</p>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <input type="text" id="searchInput" onkeyup="filterCards()" placeholder="Search Flat No. or Name..." class="search-input">
+          <button onclick="setFilter('all', this)" class="filter-btn active">All ({len(ballots)})</button>
+          <button onclick="setFilter('opt1', this)" class="filter-btn" style="color:#047857; border-color:#a7f3d0; background:#f0fdf4;">✅ Option 1: Agree ({opt1})</button>
+          <button onclick="setFilter('opt2', this)" class="filter-btn" style="color:#b45309;">🟡 Suggestions ({opt2})</button>
+          <button onclick="setFilter('opt3', this)" class="filter-btn" style="color:#b91c1c;">🔴 Disagree ({opt3})</button>
+          <button onclick="setFilter('revised', this)" class="filter-btn" style="color:#7e22ce;">🔄 Revisions (1)</button>
+          
+          <a href="/export/excel?filter=opt1" download="Mani_Tribhuvan_Option1_Agree_Flats.csv" class="filter-btn" style="background:#ecfdf5; color:#065f46; border-color:#6ee7b7; text-decoration:none;">
+            📥 Export Option 1 CSV
+          </a>
+        </div>
+      </div>
+
+      <div id="cardsContainer">
+        {cards_html}
       </div>
     </div>
 
   </div>
+
+  <script>
+    function copyWhatsAppSummary() {{
+      const summaryText = `*MANI TRIBHUVAN – SETTLEMENT POLL UPDATE*\\n` +
+        `🕒 *As of:* {updated}\\n\\n` +
+        `📊 *Total Ballots Cast:* {total} / {TOTAL_FLATS} Flats ({turnout_pct} Turnout)\\n` +
+        `-----------------------------------------\\n` +
+        `✅ *Option 1 (Agree):* {opt1} votes ({pct1})\\n` +
+        `🟡 *Option 2 (Suggestions):* {opt2} votes ({pct2})\\n` +
+        `🔴 *Option 3 (Disagree):* {opt3} votes ({pct3})\\n` +
+        `🔄 *Vote Revisions Recorded:* 1 (Flat 10NA switched to Option 3)`;
+
+      navigator.clipboard.writeText(summaryText).then(() => {{
+        const btnText = document.getElementById('copy-btn-text');
+        btnText.innerText = '✅ Copied to Clipboard!';
+        setTimeout(() => {{ btnText.innerText = '📲 Copy WhatsApp Update'; }}, 2500);
+      }}).catch(err => {{
+        alert('Could not copy automatically. Please select text manually.');
+      }});
+    }}
+
+    function setFilter(cat, btn) {{
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+
+      const items = document.querySelectorAll('.card-item');
+      items.forEach(it => {{
+        if (cat === 'all' || it.classList.contains(cat)) {{
+          it.style.display = 'block';
+        }} else {{
+          it.style.display = 'none';
+        }}
+      }});
+    }}
+
+    function filterCards() {{
+      const q = document.getElementById('searchInput').value.toLowerCase();
+      const items = document.querySelectorAll('.card-item');
+      items.forEach(it => {{
+        const text = it.innerText.toLowerCase();
+        it.style.display = text.includes(q) ? 'block' : 'none';
+      }});
+    }}
+  </script>
 </body>
 </html>
 """
@@ -438,9 +754,13 @@ def background_worker():
                         ip = r[5].strip() if len(r) > 5 else "Not Detected"
                         device = r[6].strip() if len(r) > 6 else "Web Browser"
                         status = r[7].strip() if len(r) > 7 else "LOCKED"
+                        dispatch_status = r[8].strip().upper() if len(r) > 8 else ""
 
                         if not flat_no:
                             continue
+
+                        if "SENT" in dispatch_status:
+                            dispatched.add(flat_no)
 
                         if flat_no not in dispatched:
                             member_info = members_map.get(flat_no, {})
@@ -483,6 +803,14 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
             html_out = generate_dashboard_html()
             self.wfile.write(html_out.encode("utf-8"))
+        elif self.path.startswith("/export/excel") or self.path.startswith("/export/csv"):
+            csv_bytes = generate_excel_csv(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            filename = "Mani_Tribhuvan_Option1_Agree_Flats.csv" if "opt1" in self.path else "Mani_Tribhuvan_Poll_Registry.csv"
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.end_headers()
+            self.wfile.write(csv_bytes)
         else:
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -492,7 +820,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 "service": "Mani Tribhuvan Settlement Poll Cloud Dispatcher",
                 "dispatched_count": len(dispatched),
                 "sender": SENDER_EMAIL,
-                "report_url": "/report"
+                "report_url": "/report",
+                "export_url": "/export/excel"
             }
             self.wfile.write(json.dumps(res).encode("utf-8"))
 
