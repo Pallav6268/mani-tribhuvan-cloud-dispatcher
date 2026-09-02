@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: mani-tribhuvan-dispatcher
+    env: python
+    buildCommand: ""
+    startCommand: "python -u app.py"
+    envVars:
+      - key: SENDER_EMAIL
+        value: mtrwa.office@gmail.com
+      - key: APP_PASSWORD
+        value: ybpmuratzunwiejv
+      - key: PORT
+        value: 10000
