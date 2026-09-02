@@ -13,6 +13,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
 
+# Indian Standard Time (UTC+5:30)
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
 SHEET_EXPORT_URL = os.environ.get(
     "SHEET_EXPORT_URL",
     "https://docs.google.com/spreadsheets/d/1cZ7N52nVw9yy3QpsMh1Kra9-yk7mZlm9p0IPz4XYTCw/export?format=csv&gid=0"
@@ -34,7 +37,7 @@ MEMBERS_CSV_URL = os.environ.get(
 
 TOTAL_FLATS = 465
 
-dispatched = {"14LD", "4LA", "6LB", "101", "11CD", "12LB", "1JB", "10NA", "2KC", "14BB", "3JC", "4DC", "13DB", "3BB", "13AA", "9CA"}
+dispatched = {"14LD", "4LA", "6LB", "101", "11CD", "12LB", "1JB", "10NA", "2KC", "14BB", "3JC", "4DC", "13DB", "3BB", "13AA", "9CA", "1KC"}
 
 # Shared dashboard cache
 dashboard_lock = threading.Lock()
@@ -49,6 +52,9 @@ dashboard_cache = {
     "comments": [],
     "last_updated": "Initializing..."
 }
+
+def get_current_ist_time_str():
+    return datetime.datetime.now(IST).strftime("%d %b %Y, %I:%M:%S %p IST")
 
 def load_members_from_cloud():
     members = {}
@@ -133,7 +139,7 @@ def update_dashboard_data(rows, members_map):
         dashboard_cache["open_to_revise"] = open_to_revise
         dashboard_cache["hourly"] = hourly
         dashboard_cache["comments"] = comments_list
-        dashboard_cache["last_updated"] = datetime.datetime.now().strftime("%d %b %Y, %I:%M:%S %p")
+        dashboard_cache["last_updated"] = get_current_ist_time_str()
 
 def generate_dashboard_html():
     with dashboard_lock:
@@ -147,7 +153,7 @@ def generate_dashboard_html():
     open_rev = data.get("open_to_revise", 0)
     hourly = data.get("hourly", {})
     comments = data.get("comments", [])
-    updated = data.get("last_updated", "Just now")
+    updated = data.get("last_updated", get_current_ist_time_str())
 
     pct1 = f"{(opt1 / total * 100):.1f}%" if total > 0 else "0.0%"
     pct2 = f"{(opt2 / total * 100):.1f}%" if total > 0 else "0.0%"
@@ -225,7 +231,7 @@ def generate_dashboard_html():
           <p style="font-size:13px; color:#64748b; margin-top:2px;">Real-time vote counts, hourly velocity & resident suggestions feed</p>
         </div>
         <div style="text-align:right;">
-          <div style="font-size:11px; color:#94a3b8; text-transform:uppercase; font-weight:600;">Last Synced</div>
+          <div style="font-size:11px; color:#94a3b8; text-transform:uppercase; font-weight:600;">Last Synced (IST)</div>
           <div style="font-size:14px; font-weight:700; color:#334155;">{updated}</div>
         </div>
       </div>
@@ -326,7 +332,7 @@ def generate_html(v):
       </head>
       <body>
         <h2>MANI TRIBHUVAN – SETTLEMENT POLL RESPONSE RECORD</h2>
-        <p><strong>Status:</strong> <span class="badge">{v.get('status', 'LOCKED')}</span> &nbsp;|&nbsp; <strong>Recorded at:</strong> {v.get('timestamp', time.strftime('%d/%m/%Y, %I:%M %p'))}</p>
+        <p><strong>Status:</strong> <span class="badge">{v.get('status', 'LOCKED')}</span> &nbsp;|&nbsp; <strong>Recorded at:</strong> {v.get('timestamp', datetime.datetime.now(IST).strftime('%d/%m/%Y, %I:%M %p'))}</p>
         <table>
           <tr><th>Name</th><td>{v.get('name', 'Society Member')}</td></tr>
           <tr><th>Email Address</th><td>{v.get('email', '')}</td></tr>
