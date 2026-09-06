@@ -725,88 +725,131 @@ def send_notifications_for_vote(v):
 
     return success
 
-def background_worker():
-    print("=======================================================")
-    print("  MANI TRIBHUVAN: CLOUD DISPATCHER DAEMON RUNNING 24/7")
-    print(f"  Sender: {SENDER_EMAIL}")
-    print("=======================================================\n")
+# Shared state for high-frequency dashboard updates & decoupled email dispatch
+members_map_cache = {}
+last_sheet_sync_time = 0
+sync_lock = threading.Lock()
+pending_notifications = []
+pending_lock = threading.Lock()
 
-    members_map = load_members_from_cloud()
+def sync_dashboard_sheet(force=False):
+    """Fetches the latest Google Sheet data, busts edge cache, and updates dashboard cache instantly."""
+    global last_sheet_sync_time, members_map_cache
+    now = time.time()
+    if not force and (now - last_sheet_sync_time < 12):
+        return
 
-    while True:
+    with sync_lock:
+        now = time.time()
+        if not force and (now - last_sheet_sync_time < 12):
+            return
+
+        if not members_map_cache:
+            members_map_cache = load_members_from_cloud()
+
         try:
-            req = urllib.request.Request(SHEET_EXPORT_URL, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            # Cache buster ensures Google edge CDN does not serve stale data
+            cache_busted_url = f"{SHEET_EXPORT_URL}&_cb={int(now)}"
+            req = urllib.request.Request(cache_busted_url, headers={"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 content = resp.read().decode("utf-8")
                 rows = list(csv.reader(io.StringIO(content)))
-                
-                if rows:
-                    update_dashboard_data(rows, members_map)
 
+            if rows and len(rows) > 1:
+                update_dashboard_data(rows, members_map_cache)
+                last_sheet_sync_time = now
+
+                # Add new votes to email queue
+                with pending_lock:
                     for r in rows[1:]:
                         if len(r) < 4:
                             continue
-                        timestamp = r[0].strip()
-                        email = r[1].strip()
                         flat_no = r[2].strip().upper()
-                        vote = r[3].strip()
-                        comments = r[4].strip() if len(r) > 4 else "None"
-                        ip = r[5].strip() if len(r) > 5 else "Not Detected"
-                        device = r[6].strip() if len(r) > 6 else "Web Browser"
-                        status = r[7].strip() if len(r) > 7 else "LOCKED"
                         dispatch_status = r[8].strip().upper() if len(r) > 8 else ""
-
-                        if not flat_no:
-                            continue
 
                         if "SENT" in dispatch_status:
                             dispatched.add(flat_no)
 
-                        if flat_no not in dispatched:
-                            member_info = members_map.get(flat_no, {})
-                            member_name = member_info.get("name", "Society Member")
-                            effective_email = email or member_info.get("email", "")
-
-                            vote_obj = {
-                                "name": member_name,
-                                "email": effective_email,
-                                "flat_no": flat_no,
-                                "vote": vote,
-                                "comments": comments,
-                                "ip": ip,
-                                "device": device,
-                                "status": status,
-                                "timestamp": timestamp
-                            }
-
-                            print(f"[*] NEW VOTE DETECTED: Flat {flat_no} ({member_name})! Dispatching...")
-                            res = send_notifications_for_vote(vote_obj)
-                            if res == "LIMIT_EXCEEDED":
-                                print("[!] Gmail 24-hour limit cooling down. Sleeping for 15 minutes...")
-                                time.sleep(900)
-                                break
-                            elif res:
-                                dispatched.add(flat_no)
-                                print(f"[+] Flat {flat_no} completely notified!\n")
-                            else:
-                                time.sleep(10)
+                        if flat_no and flat_no not in dispatched:
+                            # Avoid duplicates in pending queue
+                            if not any(item["flat_no"] == flat_no for item in pending_notifications):
+                                member_info = members_map_cache.get(flat_no, {})
+                                member_name = member_info.get("name", "Society Member")
+                                effective_email = r[1].strip() or member_info.get("email", "")
+                                pending_notifications.append({
+                                    "name": member_name,
+                                    "email": effective_email,
+                                    "flat_no": flat_no,
+                                    "vote": r[3].strip(),
+                                    "comments": r[4].strip() if len(r) > 4 else "None",
+                                    "ip": r[5].strip() if len(r) > 5 else "Not Detected",
+                                    "device": r[6].strip() if len(r) > 6 else "Web Browser",
+                                    "status": r[7].strip() if len(r) > 7 else "LOCKED",
+                                    "timestamp": r[0].strip()
+                                })
         except Exception as e:
-            print(f"[-] Cloud loop error: {e}")
+            print(f"[-] Sheet sync error: {e}")
 
-        time.sleep(20)
+def dashboard_sync_worker():
+    """Dedicated background thread for dashboard. Runs every 15s. NEVER blocks on emails."""
+    print("=======================================================")
+    print("  MANI TRIBHUVAN: DEDICATED REAL-TIME DASHBOARD WORKER")
+    print("=======================================================\n")
+    while True:
+        try:
+            sync_dashboard_sheet(force=False)
+        except Exception as e:
+            print(f"[-] Dashboard sync loop error: {e}")
+        time.sleep(15)
+
+def email_dispatch_worker():
+    """Isolated email dispatcher. If Gmail SMTP limits trigger, only this worker cools down."""
+    print("=======================================================")
+    print("  MANI TRIBHUVAN: ISOLATED EMAIL NOTIFICATION WORKER")
+    print("=======================================================\n")
+    while True:
+        vote_obj = None
+        with pending_lock:
+            while pending_notifications:
+                cand = pending_notifications.pop(0)
+                if cand["flat_no"] not in dispatched:
+                    vote_obj = cand
+                    break
+
+        if vote_obj:
+            flat_no = vote_obj["flat_no"]
+            print(f"[*] NEW VOTE DETECTED: Flat {flat_no} ({vote_obj['name']})! Dispatching email...")
+            res = send_notifications_for_vote(vote_obj)
+            if res == "LIMIT_EXCEEDED":
+                print("[!] Gmail 24-hour limit cooling down. Sleeping for 15 minutes...")
+                with pending_lock:
+                    pending_notifications.insert(0, vote_obj)
+                time.sleep(900)
+            elif res:
+                dispatched.add(flat_no)
+                print(f"[+] Flat {flat_no} completely notified!\n")
+            else:
+                time.sleep(10)
+        else:
+            time.sleep(10)
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ["/report", "/dashboard", "/report/", "/dashboard/"]:
+            # On-demand sync if last sync was >12 seconds ago
+            sync_dashboard_sheet(force=False)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             self.end_headers()
             html_out = generate_dashboard_html()
             self.wfile.write(html_out.encode("utf-8"))
         elif self.path.startswith("/export/excel") or self.path.startswith("/export/csv"):
+            sync_dashboard_sheet(force=False)
             csv_bytes = generate_excel_csv(self.path)
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             filename = "Mani_Tribhuvan_Option1_Agree_Flats.csv" if "opt1" in self.path else "Mani_Tribhuvan_Poll_Registry.csv"
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.end_headers()
@@ -814,11 +857,13 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             self.end_headers()
             res = {
                 "status": "healthy",
                 "service": "Mani Tribhuvan Settlement Poll Cloud Dispatcher",
                 "dispatched_count": len(dispatched),
+                "total_votes_cached": dashboard_cache.get("total_votes", 0),
                 "sender": SENDER_EMAIL,
                 "report_url": "/report",
                 "export_url": "/export/excel"
@@ -835,6 +880,8 @@ def start_server():
     server.serve_forever()
 
 if __name__ == "__main__":
-    t = threading.Thread(target=background_worker, daemon=True)
-    t.start()
+    t_dash = threading.Thread(target=dashboard_sync_worker, daemon=True)
+    t_dash.start()
+    t_email = threading.Thread(target=email_dispatch_worker, daemon=True)
+    t_email.start()
     start_server()
