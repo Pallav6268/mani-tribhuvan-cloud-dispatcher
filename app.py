@@ -519,7 +519,7 @@ def generate_dashboard_html():
           <div style="width:{pct2}; height:100%; background:#f59e0b;"></div>
         </div>
         <div style="margin-top:10px; pt:8px; border-top:1px solid #f1f5f9; font-size:11px; color:#64748b;">
-          Status: <strong style="color:#d97706;">Open to Revise</strong>
+          Locked Invariant: <strong style="color:#059669;">Permanent ({opt2})</strong>
         </div>
       </div>
 
@@ -533,7 +533,7 @@ def generate_dashboard_html():
           <div style="width:{pct3}; height:100%; background:#ef4444;"></div>
         </div>
         <div style="margin-top:10px; pt:8px; border-top:1px solid #f1f5f9; font-size:11px; color:#64748b;">
-          Reasons Logged: <strong style="color:#dc2626;">2 Submitted</strong>
+          Locked Invariant: <strong style="color:#059669;">Permanent ({opt3})</strong>
         </div>
       </div>
     </div>
